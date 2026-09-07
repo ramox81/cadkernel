@@ -53,8 +53,9 @@ pub use geometry::{Circle3, Cone, Curve3, Cylinder, Ellipse3, Line3, Sphere, Sur
 pub use boolean::{combine, Operation};
 pub use blend::{chamfer, fillet, presspull};
 pub use presspull::{
-    extrusion_profile_pieces, planar_face_at_point, planar_face_profile, planar_region, presspull_face,
-    presspull_region, subtract_planar_regions, union_planar_regions, PlanarFaceProfile,
+    extrusion_profile_pieces, intersect_planar_regions, planar_face_at_point,
+    planar_face_profile, planar_region, presspull_face, presspull_region,
+    subtract_planar_regions, union_planar_regions, PlanarFaceProfile, PlanarIntersection,
     PresspullMode,
 };
 pub use classify::{contains_point, Containment};

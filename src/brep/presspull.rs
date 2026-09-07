@@ -31,6 +31,17 @@ pub enum PresspullMode {
     Offset,
 }
 
+/// The positive-area and zero-area outcomes of a planar intersection.
+#[derive(Debug, Clone)]
+pub enum PlanarIntersection {
+    /// The inputs share a bounded area represented by this open sheet body.
+    Area(Body),
+    /// The inputs meet only along a boundary point or edge.
+    Touching,
+    /// The inputs have no point in common.
+    Disjoint,
+}
+
 /// Extracts every trimmed loop, retaining curved boundaries and holes.
 pub fn planar_face_profile(body: &Body, key: FaceKey) -> Option<PlanarFaceProfile> {
     let face = body.faces.get(key)?;
@@ -156,6 +167,140 @@ pub fn union_planar_regions(bodies: &[Body], tolerance: f64) -> Result<Body, sup
     }
 
     planar_regions_boolean(bodies, &[], Operation::Union, tolerance)
+}
+
+/// Intersects coplanar bounded sheets while preserving exact curved boundaries.
+///
+/// Each sheet is lifted into an equal-depth temporary solid. Multi-face input
+/// bodies are united first, then the input bodies are intersected in order.
+/// The surviving bottom caps are copied back into one open sheet body. A
+/// zero-area result distinguishes boundary contact from complete separation.
+pub fn intersect_planar_regions(
+    bodies: &[Body],
+    tolerance: f64,
+) -> Result<PlanarIntersection, super::Snag> {
+    if bodies.len() < 2 || !tolerance.is_finite() || tolerance <= 0.0 {
+        return Err(super::Snag::CutRefused);
+    }
+
+    let profiles = bodies
+        .iter()
+        .map(|body| {
+            body
+                .face_keys()
+                .map(|face| planar_face_profile(body, face).ok_or(super::Snag::NoClosedForm))
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let base = profiles
+        .first()
+        .and_then(|group| group.first())
+        .ok_or(super::Snag::CutRefused)?
+        .plane;
+    let normal = Vec3::from(base.normal().ok_or(super::Snag::CutRefused)?);
+    let boundaries = planar_profile_boundaries(&profiles, &base, normal, tolerance)?;
+
+    let mut solids = profiles
+        .iter()
+        .map(|group| unite_planar_profile_solids(group, &base, normal, tolerance))
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter();
+    let mut result = solids.next().ok_or(super::Snag::CutRefused)?;
+    for solid in solids {
+        result = super::combine(result, solid, Operation::Intersection, tolerance)?;
+        if result.faces.is_empty() {
+            return Ok(if planar_boundaries_share_point(&boundaries, tolerance) {
+                PlanarIntersection::Touching
+            } else {
+                PlanarIntersection::Disjoint
+            });
+        }
+    }
+
+    Ok(PlanarIntersection::Area(planar_bottom_sheets(
+        &result, &base, normal, tolerance,
+    )?))
+}
+
+fn planar_profile_boundaries(
+    profiles: &[Vec<PlanarFaceProfile>],
+    base: &Plane,
+    normal: Vec3,
+    tolerance: f64,
+) -> Result<Vec<Vec<Curve>>, super::Snag> {
+    profiles
+        .iter()
+        .map(|group| {
+            if group.is_empty() {
+                return Err(super::Snag::CutRefused);
+            }
+            let mut boundary = Vec::new();
+            for profile in group {
+                let profile_normal = Vec3::from(
+                    profile
+                        .plane
+                        .normal()
+                        .ok_or(super::Snag::CutRefused)?,
+                );
+                if normal.dot(profile_normal).abs() < 1.0 - 1e-9
+                    || base
+                        .distance_to(profile.plane.origin)
+                        .is_none_or(|distance| distance.abs() > tolerance)
+                {
+                    return Err(super::Snag::NoClosedForm);
+                }
+                let transform =
+                    plane_transform(base, &profile.plane).ok_or(super::Snag::CutRefused)?;
+                for curve in profile.loops.iter().flatten() {
+                    boundary.push(
+                        curve
+                            .transformed(&transform)
+                            .ok_or(super::Snag::CutRefused)?,
+                    );
+                }
+            }
+            Ok(boundary)
+        })
+        .collect()
+}
+
+fn planar_boundaries_share_point(boundaries: &[Vec<Curve>], tolerance: f64) -> bool {
+    let tolerance = Tolerance::new(tolerance);
+    let mut candidates = boundaries
+        .iter()
+        .flatten()
+        .flat_map(|curve| [curve.point_at(0.0), curve.point_at(1.0)])
+        .collect::<Vec<_>>();
+
+    for left in 0..boundaries.len() {
+        for right in left + 1..boundaries.len() {
+            for a in &boundaries[left] {
+                for b in &boundaries[right] {
+                    candidates.extend(
+                        crate::geom2d::intersect(a, b, tolerance)
+                            .into_iter()
+                            .map(|crossing| crossing.point),
+                    );
+                    for point in [a.point_at(0.0), a.point_at(1.0)] {
+                        if crate::geom2d::distance_to(b, point) <= tolerance.linear() {
+                            candidates.push(point);
+                        }
+                    }
+                    for point in [b.point_at(0.0), b.point_at(1.0)] {
+                        if crate::geom2d::distance_to(a, point) <= tolerance.linear() {
+                            candidates.push(point);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    candidates.into_iter().any(|point| {
+        boundaries
+            .iter()
+            .all(|curves| crate::geom2d::contains(curves, point, tolerance))
+    })
 }
 
 /// Subtracts coplanar bounded sheets while preserving exact curved boundaries.
