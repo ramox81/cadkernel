@@ -14,6 +14,7 @@
 pub mod alignment;
 pub mod curve;
 pub mod helix;
+pub mod lengthen;
 pub mod line_union;
 pub mod nurbs;
 pub mod plane;
