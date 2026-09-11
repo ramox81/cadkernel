@@ -1,6 +1,8 @@
 //! Bounded straight-segment approximation of positive-weight clamped splines.
 use super::{NurbsCurve3, Vec3};
 
+const MAX_POINTS: usize = 1_000_000;
+
 /// Approximation coordinates and the maximum control-hull chord deviation.
 pub struct SplinePolyline {
     pub points: Vec<[f64; 3]>,
@@ -15,12 +17,16 @@ impl NurbsCurve3 {
     /// Positive rational Bezier convex hulls bound every accepted segment's
     /// distance from the curve. Endpoints and knot boundaries are retained.
     /// Unsupported unclamped/discontinuous curves and exhausted resource limits
-    /// return None instead of relaxing the requested accuracy.
+    /// return None instead of relaxing the requested accuracy. Degree is limited
+    /// to 64, control/output nets to one million points, recursion to 32 levels
+    /// and cumulative extraction/subdivision work to sixteen million units.
     pub fn to_polyline_precision(&self, precision: u8) -> Option<SplinePolyline> {
-        if precision > 99 { return None; }
+        if precision > 99 || self.control_points().len() > MAX_POINTS { return None; }
         let degree = self.degree();
+        if self.knots().len() > 2 * MAX_POINTS || degree >= self.control_points().len() { return None; }
+        let mut budget = 16_000_000usize;
         let (start, end) = self.domain();
-        if degree == 0 || !self.knots()[..=degree].iter().all(|k| *k == start)
+        if degree == 0 || degree > 64 || !self.knots()[..=degree].iter().all(|k| *k == start)
             || !self.knots()[self.knots().len()-degree-1..].iter().all(|k| *k == end) { return None; }
         let mut low = self.control_points()[0]; let mut high = low;
         for point in self.control_points() {
@@ -35,12 +41,18 @@ impl NurbsCurve3 {
         }).collect();
         if controls.iter().any(|p| p[3] <= 0.0 || p.iter().any(|v| !v.is_finite())) { return None; }
         let mut knots = self.knots().to_vec();
-        let mut interior: Vec<_> = knots.iter().copied().filter(|k| *k > start && *k < end).collect();
-        interior.dedup();
-        for knot in interior {
-            let mut multiplicity = knots.iter().filter(|k| **k == knot).count();
+        let mut interior: Vec<(f64, usize)> = Vec::new();
+        for knot in knots.iter().copied().filter(|k| *k > start && *k < end) {
+            if let Some((previous, multiplicity)) = interior.last_mut() {
+                if *previous == knot { *multiplicity += 1; continue; }
+            }
+            interior.push((knot, 1));
+        }
+        for (knot, mut multiplicity) in interior {
             if multiplicity > degree { return None; }
             while multiplicity < degree {
+                if controls.len() >= MAX_POINTS { return None; }
+                budget = budget.checked_sub(controls.len().checked_add(degree)?)?;
                 let span = super::spline::span_of(degree, &knots, controls.len()-1, knot);
                 let mut next = Vec::with_capacity(controls.len()+1);
                 next.extend_from_slice(&controls[..=span-degree]);
@@ -56,7 +68,7 @@ impl NurbsCurve3 {
         }
         let mut points = vec![cartesian(controls[0])?];
         for piece in controls.windows(degree+1).step_by(degree) {
-            subdivide(piece, tolerance, 0, &mut points)?;
+            subdivide(piece, tolerance, 0, &mut budget, &mut points)?;
         }
         Some(SplinePolyline { points, tolerance })
     }
@@ -68,7 +80,8 @@ fn cartesian(p: [f64;4]) -> Option<[f64;3]> {
     result.iter().all(|x| x.is_finite()).then_some(result)
 }
 
-fn subdivide(net: &[[f64;4]], tolerance: f64, depth: usize, out: &mut Vec<[f64;3]>) -> Option<()> {
+fn subdivide(net: &[[f64;4]], tolerance: f64, depth: usize, budget: &mut usize, out: &mut Vec<[f64;3]>) -> Option<()> {
+    *budget = budget.checked_sub(net.len().checked_mul(net.len())?)?;
     let start = Vec3::from(cartesian(net[0])?);
     let end_array = cartesian(*net.last()?)?;
     let end = Vec3::from(end_array);
@@ -83,14 +96,14 @@ fn subdivide(net: &[[f64;4]], tolerance: f64, depth: usize, out: &mut Vec<[f64;3
         if !distance.is_finite() { return None; }
         if distance > tolerance { flat = false; }
     }
-    if flat { if out.len() >= 1_000_000 { return None; } out.push(end_array); return Some(()); }
-    if depth >= 32 || out.len() >= 1_000_000 { return None; }
+    if flat { if out.len() >= MAX_POINTS { return None; } out.push(end_array); return Some(()); }
+    if depth >= 32 || out.len() >= MAX_POINTS { return None; }
     let mut work = net.to_vec(); let mut left = vec![work[0]]; let mut right = vec![*work.last()?];
     for remaining in (1..work.len()).rev() {
         for i in 0..remaining { work[i] = std::array::from_fn(|axis| work[i][axis]*0.5+work[i+1][axis]*0.5); }
         left.push(work[0]); right.push(work[remaining-1]);
     }
     right.reverse();
-    subdivide(&left,tolerance,depth+1,out)?;
-    subdivide(&right,tolerance,depth+1,out)
+    subdivide(&left,tolerance,depth+1,budget,out)?;
+    subdivide(&right,tolerance,depth+1,budget,out)
 }
