@@ -39,4 +39,11 @@ pub use spline::{clamped_uniform_knots, de_boor, Parameterization};
 pub use vec::Vec3;
 
 #[cfg(feature = "geom2d")]
+<<<<<<< HEAD
 pub use planar::{common_curve_plane, PlanarCurve};
+=======
+pub use planar::PlanarCurve;
+
+mod polyline_approximation;
+pub use polyline_approximation::SplinePolyline;
+>>>>>>> cbae402
