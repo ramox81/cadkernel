@@ -21,6 +21,7 @@ pub mod line_union;
 pub mod nurbs;
 mod knot_compaction;
 pub mod plane;
+pub mod endpoint_join;
 pub mod polygon;
 pub mod spline;
 pub mod source_join;
